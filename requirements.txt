@@ -1,0 +1,21 @@
+# API
+
+fastapi # Фреймворк для работы
+pydantic # Валидация данных и маршаллинг
+starlette
+
+# Data
+
+al
+uuid # Уникальные коды
+enum # Шаблон для последовательностей
+
+# Visualization
+
+torch
+matplotlib
+
+# Calculations
+
+numpy
+
