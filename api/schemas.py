@@ -80,6 +80,20 @@ class LogEntry(pydantic.BaseModel):
     time: str
     is_granted: bool
 
+class FromMKtoServerAccessLog(pydantic.BaseModel):
+    event_id: int
+    ts: datetime
+    device: str
+    card_id: str
+    access: str
+    whitelist_version: int = None
+    rssi: int = None
+
 class ViewLogsResponse(pydantic.BaseModel):
     status: str
     data: list[LogEntry]
+
+class WhiteListResponse(pydantic.BaseModel):
+    status: str
+    device: str
+    cards: list[str]
