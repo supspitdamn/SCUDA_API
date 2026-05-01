@@ -7,24 +7,28 @@ from fastapi import HTTPException
 
 DB_CONFIG = {
     "dbname": "SCUDA_INFO",
-    "user": "admin",
-    "password": "75egve57",
-    "host": "localhost", # Запуск на локальной машине
-    "port": 5432 # стандартный порт для postgre
+    "user": "postgres",         
+    "password": "75egve57",     # Ваш пароль из инсталлятора
+    "host": "127.0.0.1",        # Прямой адрес
+    "port": 5432,
 }
 
 @asynccontextmanager
 async def lifespan(app):
 
     print("Создание пула соединений...")
-    app.db_pool = pool.SimpleConnectionPool(1, 20, **DB_CONFIG)
+    app.db_pool = pool.ThreadedConnectionPool(1, 20, **DB_CONFIG)
     conn = app.db_pool.getconn()
 
     try:
         db_init(conn)
+        conn.commit()
 
     except Exception as e:
         raise RuntimeError("Приложение не может быть запущено без БД") from e
+    
+    finally:
+        app.db_pool.putconn(conn)
 
     yield
 
