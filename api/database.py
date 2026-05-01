@@ -1,4 +1,8 @@
 import psycopg2
+from contextlib import asynccontextmanager
+from psycopg2 import pool
+from fastapi import Request
+from fastapi import HTTPException
 # использование postgre обусловлено возможным большим потоков запросов к БД
 
 DB_CONFIG = {
@@ -9,10 +13,36 @@ DB_CONFIG = {
     "port": 5432 # стандартный порт для postgre
 }
 
+@asynccontextmanager
+async def lifespan(app):
+
+    print("Создание пула соединений...")
+    app.db_pool = pool.SimpleConnectionPool(1, 20, **DB_CONFIG)
+    conn = app.db_pool.getconn()
+
+    try:
+        db_init(conn)
+
+    except Exception as e:
+        raise RuntimeError("Приложение не может быть запущено без БД") from e
+
+    yield
+
+    print("Закрытие пула соединений...")
+    app.db_pool.closeall()
+
+def get_db(request: Request):
+    conn = request.app.db_pool.getconn()
+    try:
+        yield conn
+    finally:
+        request.app.db_pool.putconn(conn)
+
 def execute_connection():
 
     """
     Установить соединение с базой данных
+    ПРИЗНАНА УСТАРЕВШЕЙ!
     """
 
     try:
@@ -25,27 +55,27 @@ def execute_connection():
         print(f"Соединение с БД не установленно. Детали: {e}")
         return None
     
-def db_init():
-
+def db_init(conn):
     """
-    Инициализация БД
+    Инициализация модифицированной БД: добавлена логика групп доступа (Many-to-Many)
     """
-
-    conn = execute_connection()
-
-    if conn:
-
-        try:
-
-            crs = conn.cursor()
+    try:
+        with conn.cursor() as crs:
 
             crs.execute("""
-                        CREATE TABLE IF NOT EXISTS roles (
-                        id SERIAL PRIMARY KEY,
-                        role_name TEXT NOT NULL UNIQUE,
-                        access_level INTEGER NOT NULL
-                        )
-                        """)
+                CREATE TABLE IF NOT EXISTS roles (
+                    id SERIAL PRIMARY KEY,
+                    role_name TEXT NOT NULL UNIQUE,
+                    access_level INTEGER NOT NULL
+                )
+            """)
+
+            crs.execute("""
+                CREATE TABLE IF NOT EXISTS access_groups (
+                    id SERIAL PRIMARY KEY,
+                    group_name TEXT NOT NULL UNIQUE
+                )
+            """)
 
             crs.execute("""
                 CREATE TABLE IF NOT EXISTS employees (
@@ -59,12 +89,36 @@ def db_init():
                 )
             """)
 
+            # Связь Сотрудник <-> Группа доступа. Многие ко многим
+            crs.execute("""
+                CREATE TABLE IF NOT EXISTS employee_access_group (
+                    id SERIAL PRIMARY KEY,
+                    employee_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE,
+                    FOREIGN KEY (group_id) REFERENCES access_groups (id) ON DELETE CASCADE,
+                    UNIQUE(employee_id, group_id)
+                )
+            """)
+
             crs.execute("""
                 CREATE TABLE IF NOT EXISTS rooms (
                     id SERIAL PRIMARY KEY,
                     room_number INTEGER NOT NULL UNIQUE,
                     description TEXT,
                     entry_level INTEGER NOT NULL
+                )
+            """)
+
+            # Связь Группа доступа <-> Комната. тоже многие ко многим
+            crs.execute("""
+                CREATE TABLE IF NOT EXISTS group_rooms (
+                    id SERIAL PRIMARY KEY,
+                    group_id INTEGER NOT NULL,
+                    room_id INTEGER NOT NULL,
+                    FOREIGN KEY (group_id) REFERENCES access_groups (id) ON DELETE CASCADE,
+                    FOREIGN KEY (room_id) REFERENCES rooms (id) ON DELETE CASCADE,
+                    UNIQUE(group_id, room_id)
                 )
             """)
 
@@ -85,36 +139,28 @@ def db_init():
                     access_point_id INTEGER NOT NULL,
                     event_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     is_granted INTEGER NOT NULL,
-                    FOREIGN KEY (employee_id) REFERENCES employees (id),
-                    FOREIGN KEY (access_point_id) REFERENCES access_points (id)
+                    FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE,
+                    FOREIGN KEY (access_point_id) REFERENCES access_points (id) ON DELETE CASCADE
                 )
             """)
 
             conn.commit()
-            print("База данных успешно инициализирована!")
+            print("Модифицированная база данных успешно инициализирована!")
 
-        except Exception as e:
+    except Exception as e:
+        print(f"Инициализация провалена: {e}")
+        conn.rollback()
 
-            print(f"Инициализация провалена: {e}")
-            conn.rollback()
-
-        finally:
-
-            conn.close()
-
-def db_clear():
+def db_clear(conn):
     """
-    Очистка базы данных (TRUNCATE быстрее для больших таблиц)
+    Очистка базы данных
     """
-    conn = execute_connection()
-    if conn:
-        try:
-            crs = conn.cursor()
-            crs.execute("TRUNCATE TABLE access_logs, access_points, rooms, employees, roles CASCADE;")
-            conn.commit()
-            print("База данных очищена.")
-        except Exception as e:
-            print(f"Ошибка в очистке базы данных. Детали: {e}")
-            conn.rollback()
-        finally:
-            conn.close()
+    try:
+        crs = conn.cursor()
+        crs.execute("TRUNCATE TABLE access_logs, access_points, rooms, employees, roles CASCADE;")
+        conn.commit()
+        print("База данных очищена.")
+    except Exception as e:
+        print(f"Ошибка в очистке базы данных. Детали: {e}")
+        conn.rollback()
+
