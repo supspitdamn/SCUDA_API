@@ -13,30 +13,28 @@ app = FastAPI(debug=True, title = "СКУД API система", lifespan=lifesp
 @app.post("/service/receive-from-mk", tags=["Service"], response_model=schemas.StatusResponse)
 async def receive_from_mk(log: schemas.FromMKtoServerAccessLog, db = Depends(get_db)):
     with db.cursor() as crs:
-
         try:
-
+            
             crs.execute("SELECT id FROM employees WHERE card_id = %s", (log.card_id,))
-            response = crs.fetchone()
-
-            emp_id = response[0] if response else None
+            res = crs.fetchone()
+            emp_id = res[0] if res else None
 
             crs.execute("SELECT id FROM access_points WHERE entrance_name = %s", (log.device,))
             ap_res = crs.fetchone()
-
+            
             if not ap_res:
-
-                raise HTTPException(status_code = 400, detail = f"Устройство {log.device} не зарегестрировано")
-
+                raise HTTPException(status_code=400, detail=f"Устройство {log.device} не зарегистрировано")
+            
             ap_id = ap_res[0]
 
             queue = """
-                        INSERT INTO access_logs (employee_id, access_point_id, event_time, is_granted)
-                        VALUES (%s, %s, %s, %s)
-                    """
+                INSERT INTO access_logs (employee_id, card_id_text, access_point_id, event_time, is_granted)
+                VALUES (%s, %s, %s, %s, %s)
+            """
             
             crs.execute(queue, (
-                emp_id, 
+                emp_id,           # Будет ID или NULL, если карта чужая
+                log.card_id,      # Текстовый номер карты запишется ВСЕГДА
                 ap_id, 
                 log.ts, 
                 1 if log.access == "granted" else 0
@@ -50,9 +48,10 @@ async def receive_from_mk(log: schemas.FromMKtoServerAccessLog, db = Depends(get
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Ошибка БД: {str(e)}")
+
         
 @app.get("/service/get-whitelist-for-mk/{device_name}", tags = ["Service"], response_model=schemas.WhiteListResponse)
-async def get_whitelis_for_mk(device_name: str, db = Depends(get_db)):
+async def get_whitelist_for_mk(device_name: str, db = Depends(get_db)):
     with db.cursor() as crs:
 
         try:
@@ -95,56 +94,53 @@ async def get_whitelis_for_mk(device_name: str, db = Depends(get_db)):
 
 @app.post("/admin/add-employee", tags=["Admin"], response_model=schemas.Employee)
 async def add_employee(emp: schemas.EmployeeCreate, db = Depends(get_db)):
-
     try:
         with db.cursor() as crs:
+            # 1. Сначала находим ID роли по её названию
+            crs.execute("SELECT id FROM roles WHERE role_name = %s", (emp.role_name,))
+            role_row = crs.fetchone()
+            
+            if not role_row:
+                raise HTTPException(status_code=404, detail=f"Роль '{emp.role_name}' не найдена")
+            
+            role_id = role_row[0]
 
-            queue = """
-                    INSERT INTO employees (
-                    card_id,
-                    full_name,
-                    department,
-                    role_id,
-                    is_active
-                    )
-                    VALUES(
-                    %s,  %s,  %s, %s,  %s
-                    )
-                    RETURNING *
+            # 2. Вставляем сотрудника
+            query = """
+                    INSERT INTO employees (card_id, full_name, department, role_id, is_active)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, card_id, full_name, department, role_id, is_active
                     """
             
-            crs.execute(queue,(
+            crs.execute(query, (
                 emp.card_id,
                 emp.full_name,
                 emp.department,
-                emp.role_id, 
-                1 if emp.is_active else 0))
+                role_id, 
+                1 if emp.is_active else 0
+            ))
             
-            row = crs.fetchone() # Получаем кортеж, например (1, 'card123', 'Имя', 'Департамент', 2, 1)
+            row = crs.fetchone()
             db.commit()
 
             if row:
-
                 return {
                     "id": row[0],
                     "card_id": row[1],
                     "full_name": row[2],
                     "department": row[3],
                     "role_id": row[4],
-                    "is_active": row[5]
+                    "is_active": bool(row[5]),
+                    "role_name": emp.role_name  # Добавляем недостающее поле из входных данных
                 }
             
-    except HTTPException as http_ex:
-        raise http_ex
-        
-    except psycopg2.errors.UniqueViolation: # Повторное создание того же сотрудника
+    except psycopg2.errors.UniqueViolation:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Такой пользователь существует")
-    
-    except Exception as e: # Какие-то проблемы сервера
+        raise HTTPException(status_code=400, detail="Сотрудник с таким card_id уже существует")
+    except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {e}")
+
 @app.post("/admin/add-room", tags = ["Admin"], response_model=schemas.Room)
 async def add_room(emp: schemas.RoomCreate, db = Depends(get_db)):
 
@@ -306,113 +302,118 @@ async def add_access_group(emp: schemas.AccessGroupCreate, db = Depends(get_db))
         db.rollback()
         raise HTTPException(status_code = 500, detail="Ошибка добавления роли")
 
-@app.post("/admin/assign-group-to-employee", tags = ["Admin"], response_model=schemas.EmployeeAccessGroup)
+@app.post("/admin/assign-group-to-employee", tags=["Admin"], response_model=schemas.EmployeeAccessGroup)
 async def assign_group_to_employee(emp: schemas.EmployeeAccessGroupCreate, db = Depends(get_db)):
     try:
         with db.cursor() as crs:
+            crs.execute("SELECT id FROM employees WHERE card_id = %s", (emp.card_id,))
+            employee_row = crs.fetchone()
 
-            queue = """
-                    INSERT INTO employee_access_group (
-                    employee_id,
-                    group_id
-                    )
+            crs.execute("SELECT id FROM access_groups WHERE group_name = %s", (emp.group_name,))
+            group_row = crs.fetchone()
+            
+            if not employee_row:
+                raise HTTPException(status_code=404, detail=f"Сотрудник с картой {emp.card_id} не найден")
+            
+            if not group_row:
+                raise HTTPException(status_code=404, detail=f"Группа {emp.group_name} не найдена")
+            
+            emp_id = employee_row[0]
+            grp_id = group_row[0]
+
+            query = """
+                    INSERT INTO employee_access_group (employee_id, group_id)
                     VALUES (%s, %s)
-                    RETURNING id, employee_id, group_id
+                    RETURNING id
                     """
             
-            crs.execute(queue, (emp.employee_id, emp.group_id))
-
-            response = crs.fetchone()
-
+            crs.execute(query, (emp_id, grp_id))
+            res_id = crs.fetchone()[0]
             db.commit()
 
-            print(f"Пользователь с id {response[1]} был добавлен в группу {response[2]}")
+            return {
+                "id": res_id,
+                "card_id": emp.card_id,
+                "group_name": emp.group_name
+            }
 
-            return {"id": response[0],
-                    "employee_id": response[1],
-                    "group_id": response[2]}
-    except HTTPException as htex:
-        raise htex
     except psycopg2.errors.UniqueViolation:
         db.rollback()
-        raise HTTPException(status_code = 400, detail = "Пользователь уже находится в этой группе")
-    except psycopg2.errors.ForeignKeyViolation:
-        db.rollback()
-        raise HTTPException(status_code=404, detail="Указанный сотрудник или группа доступа не найдены")
+        raise HTTPException(status_code=400, detail="Пользователь уже находится в этой группе")
+    except HTTPException as htex:
+        raise htex
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code = 500, detail = f"Ошибка сервера. Детали: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {e}")
 
-@app.post("/admin/assign-room-to-group", tags = ["Admin"], response_model=schemas.RoomGroup)
-async def assign_room_to_group(emp: schemas.RoomGroupCreate, db = Depends(get_db)):
+
+@app.post("/admin/assign-room-to-group", tags=["Admin"])
+async def assign_room_to_group(data: schemas.RoomGroupCreate, db = Depends(get_db)):
     try:
         with db.cursor() as crs:
+            # Находим ID группы по имени
+            crs.execute("SELECT id FROM access_groups WHERE group_name = %s", (data.group_name,))
+            group_row = crs.fetchone()
+            
+            if not group_row:
+                raise HTTPException(status_code=404, detail=f"Группа '{data.group_name}' не найдена")
+            
+            group_id = group_row[0]
 
-            queue = """
-                    INSERT INTO group_rooms (
-                    group_id,
-                    room_id
-                    )
+            # Привязываем комнату к группе
+            query = """
+                    INSERT INTO group_rooms (group_id, room_id)
                     VALUES (%s, %s)
                     RETURNING id, group_id, room_id
                     """
-            
-            crs.execute(queue, (emp.group_id, emp.room_id))
-
-            response = crs.fetchone()
-
+            crs.execute(query, (group_id, data.room_id))
+            res = crs.fetchone()
             db.commit()
 
-            print(f"Комната с id {response[2]} внесена в группу {response[1]}")
+            return {"id": res[0], "group_id": res[1], "room_id": res[2]}
 
-            return {"id": response[0],
-                    "group_id": response[1],
-                    "room_id": response[2]}
-    except HTTPException as htex:
-        raise htex
     except psycopg2.errors.UniqueViolation:
         db.rollback()
-        raise HTTPException(status_code = 400, detail = "В группе уже существует эта комната")
+        raise HTTPException(status_code=400, detail="Эта комната уже добавлена в данную группу")
     except psycopg2.errors.ForeignKeyViolation:
         db.rollback()
-        raise HTTPException(status_code = 404, detail = "Группа или комната не найдены")
+        raise HTTPException(status_code=404, detail="Указанная комната не существует")
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code = 500, detail = str(e))
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {e}")
+
     
 # Методы удаления/измения статусов
 
-@app.delete("/admin/remove-employee-from-access-group/{full_name}/{group_name}", tags=["Admin"], response_model=schemas.StatusResponse)
-async def remove_employee_from_access_group(full_name: str, group_name: str, db = Depends(get_db)):
+@app.delete("/admin/remove-employee-from-access-group", tags=["Admin"], response_model=schemas.StatusResponse)
+async def remove_employee_from_access_group(card_id: str, group_name: str, db = Depends(get_db)):
     try:
         with db.cursor() as crs:
-            check_queue = """
-                SELECT eag.id 
+
+            query = """
+                SELECT eag.id, e.full_name 
                 FROM employee_access_group eag
                 JOIN employees e ON eag.employee_id = e.id
                 JOIN access_groups ag ON eag.group_id = ag.id
-                WHERE e.full_name = %s AND ag.group_name = %s
+                WHERE e.card_id = %s AND ag.group_name = %s
             """
-            crs.execute(check_queue, (full_name, group_name))
+            crs.execute(query, (card_id, group_name))
             res = crs.fetchone()
 
             if not res:
                 raise HTTPException(
                     status_code=404, 
-                    detail=f"Связь не найдена: {full_name} не состоит в группе {group_name}"
+                    detail=f"Связь не найдена или сотрудник с картой {card_id} не состоит в группе {group_name}"
                 )
 
-            # Удаляем связь
-            delete_queue = """
-                DELETE FROM employee_access_group 
-                WHERE id = %s
-            """
-            crs.execute(delete_queue, (res[0],))
+            record_id, full_name = res
+
+            crs.execute("DELETE FROM employee_access_group WHERE id = %s", (record_id,))
             db.commit()
 
             return {
                 "status": "ОК",
-                "message": f"Сотрудник {full_name} удален из группы {group_name}"
+                "message": f"Сотрудник {full_name} успешно удален из группы {group_name}"
             }
         
     except HTTPException:
@@ -420,6 +421,7 @@ async def remove_employee_from_access_group(full_name: str, group_name: str, db 
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.delete("/admin/remove-room-from-access-group/{group_name}/{room_number}", tags=["Admin"], response_model=schemas.StatusResponse)
 async def remove_room_from_access_group(group_name: str, room_number: int, db = Depends(get_db)):
@@ -662,6 +664,15 @@ async def delete_access_point(room_number: int, entrance_name: str, db = Depends
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/admin/clear-database", tags = ["Admin"])
+async def clear_database(db = Depends(get_db)):
+    try:
+        database.db_clear(conn=db)
+        print("База данных очищена")
+        db_init()
+        print("База данных реинициализированная")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # просмотр информации
 
