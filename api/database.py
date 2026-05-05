@@ -139,11 +139,12 @@ def db_init(conn):
             crs.execute("""
                 CREATE TABLE IF NOT EXISTS access_logs (
                     id SERIAL PRIMARY KEY,
-                    employee_id INTEGER NOT NULL,
+                    employee_id INTEGER,
+                    card_id_text TEXT,
                     access_point_id INTEGER NOT NULL,
                     event_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     is_granted INTEGER NOT NULL,
-                    FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE,
+                    FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE SET NULL,
                     FOREIGN KEY (access_point_id) REFERENCES access_points (id) ON DELETE CASCADE
                 )
             """)
@@ -159,12 +160,27 @@ def db_clear(conn):
     """
     Очистка базы данных
     """
+    tables = [
+        "access_logs",
+        "access_points",
+        "group_rooms",
+        "employee_access_group",
+        "rooms",
+        "employees",
+        "access_groups",
+        "roles"
+    ]
+    
     try:
-        crs = conn.cursor()
-        crs.execute("TRUNCATE TABLE access_logs, access_points, rooms, employees, roles CASCADE;")
-        conn.commit()
-        print("База данных очищена.")
+        with conn.cursor() as crs:
+            for table in tables:
+                # Используем CASCADE для PostgreSQL, чтобы удалить связанные объекты
+                crs.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+            
+            conn.commit()
+            print("Все таблицы успешно удалены.")
+            
     except Exception as e:
-        print(f"Ошибка в очистке базы данных. Детали: {e}")
+        print(f"Ошибка при удалении таблиц: {e}")
         conn.rollback()
 
