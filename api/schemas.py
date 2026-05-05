@@ -10,14 +10,14 @@ class AccessGroup(AccessGroupCreate):
     id: int
 
 class EmployeeAccessGroupCreate(pydantic.BaseModel):
-    employee_id: int
-    group_id : int
+    card_id: str
+    group_name : str
 
 class EmployeeAccessGroup(EmployeeAccessGroupCreate):
     id : int
 
 class RoomGroupCreate(pydantic.BaseModel):
-    group_id: int
+    group_name: str
     room_id: int
 
 class RoomGroup(RoomGroupCreate):
@@ -39,7 +39,7 @@ class EmployeeCreate(pydantic.BaseModel):
     card_id: str
     full_name: str
     department: str
-    role_id: int
+    role_name: str
     is_active: bool = True
 
 class Employee(EmployeeCreate):
