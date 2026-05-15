@@ -3,6 +3,7 @@
 fastapi # Фреймворк для работы
 pydantic # Валидация данных и маршаллинг
 starlette
+paho-mqtt # MQTT
 
 # Data
 
