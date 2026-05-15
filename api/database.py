@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from psycopg2 import pool
 from fastapi import Request
 from fastapi import HTTPException
+from api.mqtt_worker import init_worker_pool, start_mqtt, mqtt_client
 # использование postgre обусловлено возможным большим потоков запросов к БД
 
 DB_CONFIG = {
@@ -15,7 +16,6 @@ DB_CONFIG = {
 
 @asynccontextmanager
 async def lifespan(app):
-
     print("Создание пула соединений...")
     app.db_pool = pool.ThreadedConnectionPool(1, 20, **DB_CONFIG)
     conn = app.db_pool.getconn()
@@ -23,14 +23,22 @@ async def lifespan(app):
     try:
         db_init(conn)
         conn.commit()
-
     except Exception as e:
         raise RuntimeError("Приложение не может быть запущено без БД") from e
-    
     finally:
         app.db_pool.putconn(conn)
 
+    # Передаем созданный пул базы данных внутрь воркера
+    init_worker_pool(app.db_pool)
+
+    # Запускаем фоновый поток MQTT
+    print("Запуск фонового MQTT-воркера...")
+    start_mqtt() 
+
     yield
+
+    print("Остановка фонового MQTT-воркера...")
+    mqtt_client.loop_stop()
 
     print("Закрытие пула соединений...")
     app.db_pool.closeall()
@@ -130,8 +138,10 @@ def db_init(conn):
                 CREATE TABLE IF NOT EXISTS access_points (
                     id SERIAL PRIMARY KEY,  
                     room_id INTEGER NOT NULL,
-                    entrance_name TEXT NOT NULL,
+                    entrance_name TEXT NOT NULL,         -- Для человека: "Главный вход", "Бухгалтерия"
+                    device_mac TEXT NOT NULL UNIQUE,     -- Для железа: "esp32_34CDB033BBD8"
                     direction TEXT CHECK (direction IN ('IN', 'OUT', 'BOTH')),
+                    whitelist_version INTEGER DEFAULT 1, -- Версия вайтлиста для этого контроллера
                     FOREIGN KEY (room_id) REFERENCES rooms (id) ON DELETE CASCADE
                 )
             """)
