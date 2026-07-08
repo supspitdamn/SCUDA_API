@@ -4,7 +4,6 @@ from psycopg2 import pool
 from fastapi import Request
 from fastapi import HTTPException
 from api.mqtt_worker import init_worker_pool, start_mqtt, mqtt_client
-# использование postgre обусловлено возможным большим потоков запросов к БД
 
 DB_CONFIG = {
     "dbname": "SCUDA_INFO",
@@ -184,7 +183,6 @@ def db_clear(conn):
     try:
         with conn.cursor() as crs:
             for table in tables:
-                # Используем CASCADE для PostgreSQL, чтобы удалить связанные объекты
                 crs.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
             
             conn.commit()

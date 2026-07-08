@@ -2,8 +2,8 @@ import json
 import time
 import traceback
 import psycopg2
-import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
+import paho.mqtt.client as mqtt
 
 MQTT_BROKER = "127.0.0.1"
 MQTT_PORT = 1883
@@ -23,17 +23,18 @@ def get_whitelist_for_mk_direct(device_mac: str) -> list:
     if not db_pool:
         print("[WORKER SQL ERROR] db_pool равен None!")
         return []
+    
     conn = db_pool.getconn()
     try:
+        conn.autocommit = True
         with conn.cursor() as crs:
-            device_mac = device_mac.strip().upper()
+            sql_mac = device_mac.strip().upper()
             crs.execute(
-                "SELECT id FROM access_points WHERE device_mac = %s", (device_mac,)
+                "SELECT id FROM access_points WHERE device_mac = %s", (sql_mac,)
             )
             ap_row = crs.fetchone()
-            print(f"[WORKER SQL] Поиск точки доступа: {ap_row}")
             if not ap_row:
-                print(f"[WORKER SQL WARNING] MAC {device_mac} отсутствует в БД!")
+                print(f"[WORKER SQL WARNING] MAC {sql_mac} отсутствует в БД!")
                 return []
 
             queue = """
@@ -45,11 +46,13 @@ def get_whitelist_for_mk_direct(device_mac: str) -> list:
                 JOIN access_points ap ON gr.room_id = ap.room_id
                 WHERE ap.device_mac = %s AND e.is_active = 1
             """
-            crs.execute(queue, (device_mac,))
+            crs.execute(queue, (sql_mac,))
             rows = crs.fetchall()
             print(f"[WORKER SQL] Найдено строк в fetchall: {rows}")
-            cards = [row[0] for row in rows]
-            print(f"[WORKER SQL] Результат (список карт): {cards}")
+            
+            # ГАРАНТИРОВАННО извлекаем саму строку карты (индекс 0) из кортежа psycopg2
+            cards = [str(row[0]).strip() for row in rows if row and row[0]]
+            print(f"[WORKER SQL] Итоговый чистый список карт: {cards}")
             return cards
     except Exception as e:
         print(f"[WORKER SQL CRITICAL] get_whitelist упал: {e}")
@@ -59,24 +62,27 @@ def get_whitelist_for_mk_direct(device_mac: str) -> list:
         db_pool.putconn(conn)
 
 
+
 def receive_from_mk_direct(payload: dict, device_mac: str):
     print(f"[WORKER LOG] Старт записи лога. MAC: {device_mac}")
     if not db_pool:
         print("[WORKER LOG ERROR] db_pool равен None!")
         return
+    
     conn = db_pool.getconn()
     try:
+        conn.autocommit = True  # Принудительная запись INSERT без зависания транзакции
         with conn.cursor() as crs:
-            device_mac = device_mac.strip().upper()
+            sql_mac = device_mac.strip().upper()
             crs.execute(
-                "SELECT id FROM access_points WHERE device_mac = %s", (device_mac,)
+                "SELECT id FROM access_points WHERE device_mac = %s", (sql_mac,)
             )
             ap_res = crs.fetchone()
             print(f"[WORKER LOG SQL] Поиск точки прохода: {ap_res}")
             if not ap_res:
-                print(f"[WORKER LOG ERROR] Отмена. Точка {device_mac} не найдена.")
+                print(f"[WORKER LOG ERROR] Отмена. Точка {sql_mac} не найдена.")
                 return
-            ap_id = ap_res[0]
+            ap_id = ap_res[0]  # Извлекаем чистое число, а не кортеж (1,)
 
             card_id = payload.get("uid") or payload.get("card_id")
             print(f"[WORKER LOG] Номер карты из JSON: {card_id}")
@@ -87,22 +93,21 @@ def receive_from_mk_direct(payload: dict, device_mac: str):
             crs.execute("SELECT id FROM employees WHERE card_id = %s", (card_id,))
             res = crs.fetchone()
             print(f"[WORKER LOG SQL] Поиск сотрудника: {res}")
-            emp_id = res[0] if res else None
+            emp_id = res[0] if res else None  # Извлекаем чистое число или None
 
             ts = payload.get("ts") or payload.get("timestamp") or int(time.time())
             is_granted = 1 if str(payload.get("access")).lower() == "granted" else 0
 
             queue = """
                 INSERT INTO access_logs (employee_id, card_id_text, access_point_id, event_time, is_granted)
-                VALUES (%s, %s, %s, to_timestamp(%s), %s)
+                VALUES (%s, %s, %s, %s, %s)
             """
+
             print(f"[WORKER LOG SQL] INSERT: emp={emp_id}, card='{card_id}', ap={ap_id}, ts={ts}")
             crs.execute(queue, (emp_id, card_id, ap_id, ts, is_granted))
-            conn.commit()
             print(f"[WORKER SUCCESS] ЛОГ УСПЕШНО ЗАПИСАН! Карта: {card_id}")
     except Exception as e:
         print(f"[WORKER LOG SQL CRITICAL] Ошибка записи лога: {e}")
-        conn.rollback()
         traceback.print_exc()
     finally:
         db_pool.putconn(conn)
@@ -112,39 +117,44 @@ def check_and_trigger_sync(client, device_mac, device_version):
     print(f"[WORKER SYNC] Сверка версий для {device_mac}. На плате: {device_version}")
     raw_cards = get_whitelist_for_mk_direct(device_mac)
     server_version = len(raw_cards)
-    print(f"[WORKER SYNC DIAG] Плата = {device_version} | Сервер = {server_version}")
+    print(f"[WORKER SYNC DIAG] Плата = {device_version} | Server = {server_version}")
 
     if device_version != server_version:
         print(f"[WORKER SYNC] Версии не равны! Формируем JSON...")
+        
         sync_payload = {
+            "cmd": "sync_cards",
             "request_id": f"auto-sync-{int(time.time())}",
             "whitelist_version": server_version,
-            "cards": raw_cards,
+            "cards": raw_cards
         }
 
-        mqtt_mac = device_mac.strip().lower()
-        topic = f"skud/{mqtt_mac}/cmd/sync_cards"
-        print(f"[WORKER SYNC MQTT] Отправка в ТОПИК: {topic}")
+        topic = f"skud/{device_mac}/cmd/sync_cards"
+        
+        print(f"[WORKER SYNC MQTT] Отправка топика с очисткой памяти: '{topic}'")
+    
         print(f" -> Payload: {sync_payload}")
+        
         res = client.publish(topic, json.dumps(sync_payload))
         print(f" -> Код ответа брокера: {res.rc} (0 = УСПЕХ)")
 
         conn = db_pool.getconn()
         try:
+            conn.autocommit = True
             with conn.cursor() as crs:
+                sql_mac = device_mac.strip().upper()
                 crs.execute(
                     "UPDATE access_points SET whitelist_version = %s WHERE device_mac = %s;",
-                    (server_version, device_mac),
+                    (server_version, sql_mac),
                 )
-                conn.commit()
                 print(f"[WORKER SYNC SQL] Версия {server_version} сохранена в БД")
         except Exception as e:
             print(f"[WORKER SYNC SQL ERROR] Ошибка: {e}")
-            conn.rollback()
         finally:
             db_pool.putconn(conn)
     else:
-        print("[WORKER SYNC] Версии равны, обновление не требуется.")
+        print("[WORKER SYNC] Версии равны, update не требуется.")
+
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -171,8 +181,9 @@ def on_message(client, userdata, msg):
             print(f"[WORKER INBOUND ERROR] Структура топика битая: {msg.topic}")
             return
 
-        device_mac = topic_parts[1].strip().upper()
-        print(f"[WORKER INBOUND] Распознан MAC: {device_mac}")
+        # Забираем оригинальный MAC как есть ('esp32_34CDB033BBD8'), без изменения регистра
+        device_mac = topic_parts[1].strip()
+        print(f"[WORKER INBOUND] Распознан оригинальный MAC: {device_mac}")
 
         if "event/access" in msg.topic:
             print("[WORKER INBOUND ROUTE] Пакет: EVENT/ACCESS")
