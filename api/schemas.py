@@ -30,7 +30,6 @@ class DirectionsEnum(str, Enum):
 
 class RoleCreate(pydantic.BaseModel):
     role_name: str
-    access_level: int
 
 class Role(RoleCreate):
     id: int
@@ -48,7 +47,6 @@ class Employee(EmployeeCreate):
 class RoomCreate(pydantic.BaseModel):
     room_number: int
     description: str = None
-    entry_level: int
 
 class Room(RoomCreate):
     id: int
@@ -56,6 +54,7 @@ class Room(RoomCreate):
 class AccessPointCreate(pydantic.BaseModel):
     room_id: int
     entrance_name: str
+    device_mac: str
     direction: DirectionsEnum
 
 class AccessPoint(AccessPointCreate):

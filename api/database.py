@@ -76,8 +76,7 @@ def db_init(conn):
             crs.execute("""
                 CREATE TABLE IF NOT EXISTS roles (
                     id SERIAL PRIMARY KEY,
-                    role_name TEXT NOT NULL UNIQUE,
-                    access_level INTEGER NOT NULL
+                    role_name TEXT NOT NULL UNIQUE
                 )
             """)
 
@@ -116,8 +115,7 @@ def db_init(conn):
                 CREATE TABLE IF NOT EXISTS rooms (
                     id SERIAL PRIMARY KEY,
                     room_number INTEGER NOT NULL UNIQUE,
-                    description TEXT,
-                    entry_level INTEGER NOT NULL
+                    description TEXT
                 )
             """)
 

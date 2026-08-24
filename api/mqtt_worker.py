@@ -114,6 +114,7 @@ def receive_from_mk_direct(payload: dict, device_mac: str):
 
 
 def check_and_trigger_sync(client, device_mac, device_version):
+
     print(f"[WORKER SYNC] Сверка версий для {device_mac}. На плате: {device_version}")
     raw_cards = get_whitelist_for_mk_direct(device_mac)
     server_version = len(raw_cards)
@@ -123,9 +124,8 @@ def check_and_trigger_sync(client, device_mac, device_version):
         print(f"[WORKER SYNC] Версии не равны! Формируем JSON...")
         
         sync_payload = {
-            "cmd": "sync_cards",
             "request_id": f"auto-sync-{int(time.time())}",
-            "whitelist_version": server_version,
+            "version": server_version,
             "cards": raw_cards
         }
 
@@ -181,7 +181,6 @@ def on_message(client, userdata, msg):
             print(f"[WORKER INBOUND ERROR] Структура топика битая: {msg.topic}")
             return
 
-        # Забираем оригинальный MAC как есть ('esp32_34CDB033BBD8'), без изменения регистра
         device_mac = topic_parts[1].strip()
         print(f"[WORKER INBOUND] Распознан оригинальный MAC: {device_mac}")
 

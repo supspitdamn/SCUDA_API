@@ -3,7 +3,6 @@ import api.schemas as schemas
 from fastapi import FastAPI, HTTPException, Depends
 from api.database import db_init, get_db, lifespan, DB_CONFIG, db_clear
 import psycopg2
-from contextlib import asynccontextmanager
 
 DEVICE_ID = "esp32_34CDB033BBD8"
 
@@ -67,19 +66,17 @@ def add_room(emp: schemas.RoomCreate, db = Depends(get_db)):
             queue = """
                     INSERT INTO rooms (
                     room_number,
-                    description,
-                    entry_level
+                    description
                     )
                     VALUES (
-                    %s, %s, %s
+                    %s, %s
                     )
                     RETURNING *
                     """
             
             crs.execute(queue, (
                          emp.room_number,
-                         emp.description, 
-                         emp.entry_level
+                         emp.description
                          ))
             
             response = crs.fetchone()
@@ -87,8 +84,7 @@ def add_room(emp: schemas.RoomCreate, db = Depends(get_db)):
             return {
                 "id": response[0],
                 "room_number": response[1],
-                "description": response[2],
-                "entry_level": response[3]
+                "description": response[2]
             }
     except HTTPException as http_ex:
         raise http_ex
@@ -121,7 +117,7 @@ def add_access_point(ap: schemas.AccessPointCreate, db = Depends(get_db)):
             crs.execute(queue, (
                 ap.room_id,
                 ap.entrance_name,
-                ap.device_mac,
+                ap.device_mac.upper(),
                 ap.direction.value
             ))
 
@@ -153,42 +149,29 @@ def add_access_point(ap: schemas.AccessPointCreate, db = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code = 500, detail = str(e))
 
-@app.post("/admin/add-role", tags = ["Admin"], response_model=schemas.Role)
+@app.post("/admin/add-role", tags=["Admin"], response_model=schemas.Role)
 def add_role(role: schemas.RoleCreate, db = Depends(get_db)):
-
     try:
-
         with db.cursor() as crs:
-
             queue = """
-                    INSERT INTO roles (role_name, access_level)
-                    VALUES (%s, %s)
-                    RETURNING id, role_name, access_level
-                    """
-            
-            crs.execute(queue, (role.role_name, role.access_level))
-
+                INSERT INTO roles (role_name) 
+                VALUES (%s) 
+                RETURNING id, role_name
+            """
+            crs.execute(queue, (role.role_name,))
             response = crs.fetchone()
-
             db.commit()
-
-            return {"id": response[0],
-                     "role_name": response[1],
-                       "access_level": response[2]
+            return {
+                "id": response[0], 
+                "role_name": response[1]
             }
-        
-    except HTTPException as http_ex:
-        raise http_ex
-        
     except psycopg2.errors.UniqueViolation:
-
         db.rollback()
-        raise HTTPException(status_code=400, detail = "Такая роль уже существует")
-
+        raise HTTPException(status_code=400, detail="Такая роль уже существует")
     except Exception as e:
-
         db.rollback()
-        raise HTTPException(status_code=500, detail = str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/admin/add-access-group", tags = ["Admin"], response_model=schemas.AccessGroup)
 def add_access_group(ag: schemas.AccessGroupCreate, db = Depends(get_db)):
@@ -532,48 +515,6 @@ def change_employee_card_status(card_id: str, restrict: bool, db = Depends(get_d
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
- 
-@app.patch("/admin/change-access-level-by-role/{role_name}", tags=["Admin"], response_model=schemas.StatusResponse)
-def change_access_level_by_role(role_name: str, access_level: int, db = Depends(get_db)):
-    try:
-        with db.cursor() as crs:
-            crs.execute("""
-                SELECT DISTINCT gr.room_id 
-                FROM group_rooms gr
-                JOIN employee_access_group eag ON gr.group_id = eag.group_id
-                JOIN employees e ON eag.employee_id = e.id
-                JOIN roles r ON e.role_id = r.id
-                WHERE r.role_name = %s
-            """, (role_name,))
-            rooms = [row for row in crs.fetchall()]
-
-            crs.execute(
-                "UPDATE roles SET access_level = %s WHERE role_name = %s",
-                (access_level, role_name)
-            )
-
-            if crs.rowcount == 0:
-                raise HTTPException(status_code=404, detail=f"Роль '{role_name}' не найдена")
-
-            if rooms:
-                crs.execute("""
-                    UPDATE access_points 
-                    SET whitelist_version = whitelist_version + 1 
-                    WHERE room_id = ANY(%s)
-                """, (rooms,))
-
-            db.commit()
-
-            return {
-                "status": "ОК", 
-                "message": f"Уровень доступа для роли '{role_name}' успешно изменен на {access_level}"
-            }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/admin/change-employee-role/{card_id}", tags=["Admin"], response_model=schemas.StatusResponse)
 def change_employee_role(card_id: str, new_role_name: str, db = Depends(get_db)):
@@ -615,42 +556,6 @@ def change_employee_role(card_id: str, new_role_name: str, db = Depends(get_db))
             return {
                 "status": "ОК", 
                 "message": f"Сотруднику с картой {card_id} успешно назначена роль '{new_role_name}'"
-            }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
-
-@app.patch("/admin/change-room-access-level/{room_number}", tags=["Admin"], response_model=schemas.StatusResponse)
-def change_room_access_level(room_number: int, level: int, db = Depends(get_db)):
-    try:
-        with db.cursor() as crs:
-            crs.execute("SELECT id FROM rooms WHERE room_number = %s", (room_number,))
-            room_row = crs.fetchone()
-
-            if not room_row:
-                raise HTTPException(status_code=404, detail=f"Комната №{room_number} не найдена")
-
-            room_id = room_row[0]
-
-            crs.execute(
-                "UPDATE rooms SET entry_level = %s WHERE id = %s",
-                (level, room_id)
-            )
-
-            crs.execute("""
-                UPDATE access_points 
-                SET whitelist_version = whitelist_version + 1 
-                WHERE room_id = %s
-            """, (room_id,))
-
-            db.commit()
-
-            return {
-                "status": "ОК", 
-                "message": f"Комнате №{room_number} успешно назначен уровень допуска {level}"
             }
         
     except HTTPException:
@@ -809,7 +714,6 @@ def view_logs(db = Depends(get_db), limit: int = 10, offset: int = 0):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/admin/view-employees", tags=["Admin"], response_model=list[schemas.Employee])
 def view_employees(limit: int = 10, offset: int = 0, db = Depends(get_db)):
     try:
@@ -853,8 +757,7 @@ def view_rooms(limit: int = 10, offset: int = 0, db = Depends(get_db)):
                     SELECT
                         r.id,
                         r.room_number,
-                        r.description,
-                        r.entry_level
+                        r.description
                     FROM rooms AS r
                     ORDER BY r.room_number
                     LIMIT %s OFFSET %s
@@ -866,8 +769,7 @@ def view_rooms(limit: int = 10, offset: int = 0, db = Depends(get_db)):
             {
                 "id": r[0], 
                 "room_number": r[1], 
-                "description": r[2], 
-                "entry_level": r[3]
+                "description": r[2]
             } for r in rows
         ]
         
@@ -881,11 +783,9 @@ def view_roles(limit: int = 10, offset: int = 0, db = Depends(get_db)):
             queue = """
                     SELECT
                         id,
-                        role_name,
-                        access_level
+                        role_name
                     FROM
                         roles
-                    ORDER BY access_level ASC
                     LIMIT %s
                     OFFSET %s
                     """
@@ -895,8 +795,7 @@ def view_roles(limit: int = 10, offset: int = 0, db = Depends(get_db)):
         return [
             {
                 "id": r[0], 
-                "role_name": r[1], 
-                "access_level": r[2]
+                "role_name": r[1]
             } for r in rows
         ]
         
